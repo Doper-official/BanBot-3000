@@ -1238,7 +1238,7 @@ DUAL-INSTANCE SETUP GUIDE
 
 The system is now production-ready with full high availability,
 monitoring integration, and robust failover capabilities!
-""".command(name="help", aliases=["h"])
+"""
 async def help_command(ctx):
     """Display help information"""
     if not bot.is_active_instance:
