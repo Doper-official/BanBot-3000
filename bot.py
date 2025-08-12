@@ -2053,23 +2053,6 @@ async def help_command(ctx):
 
     await ctx.send(embed=embed)
 
-@bot.command()
-async def ping(ctx):
-    """Test bot responsiveness"""
-    if not bot.is_active_instance:
-        return
-        
-    bot.log_command_usage(ctx, "ping")
-    
-    latency = round(bot.latency * 1000)
-    embed = discord.Embed(
-        title="🏓 Pong!",
-        description=f"BanBot 3000 HA is online!\n**Instance:** {bot.role.value.upper()} {'ACTIVE' if bot.is_active_instance else 'STANDBY'}\n**Latency:** {latency}ms\n**PID:** {os.getpid()}",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-    
-
 @bot.command() 
 async def hastatus(ctx):
     """Show High Availability status"""
