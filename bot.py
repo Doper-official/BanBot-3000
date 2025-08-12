@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dual-Instance Discord Moderation Bot System (BanBot 3000 HA)
-===========================================================
-
-This system runs two instances of the moderation bot:
-- One as PRIMARY (actively handling Discord events)
-- One as SECONDARY (standby mode, ready for failover)
-
-Features:
-- Automatic failover within 60 seconds
-- Real-time data synchronization via HTTP API
-- Health monitoring and UptimeRobot integration
-- Seamless switchover without duplicate actions
-- Only one instance connected to Discord at a time
-"""
-
 import discord
 from discord.ext import commands, tasks
 import asyncio
