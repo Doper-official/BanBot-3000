@@ -2068,8 +2068,9 @@ async def ping(ctx):
         color=discord.Color.green()
     )
     await ctx.send(embed=embed)
+    
 
-@bot.command()
+@bot.command() 
 async def hastatus(ctx):
     """Show High Availability status"""
     if not bot.is_active_instance:
