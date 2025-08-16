@@ -150,51 +150,52 @@ class CodeCommandManager:
                 
             if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
                 return await ctx.send("❌ This command only works in servers")
-try:
-    # Update usage count
-    custom_cmd.usage_count += 1
-    self.bot.stats["custom_commands_used"] += 1
+            
+            try:
+                # Update usage count
+                custom_cmd.usage_count += 1
+                self.bot.stats["custom_commands_used"] += 1
 
-    # Create safe execution environment
-    safe_globals = {
-        '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
-        'discord': discord,
-        'asyncio': asyncio,
-        'random': __import__('random'),
-        'datetime': datetime,
-        'math': __import__('math'),
-        'json': json,
-        're': __import__('re'),
-        # Command context variables
-        'ctx': ctx,
-        'bot': self.bot,
-        'args': args,
-        'user': ctx.author,
-        'guild': ctx.guild,
-        'channel': ctx.channel,
-        'message': ctx.message,
-        # Helper functions
-        'send': ctx.send,
-        'reply': ctx.reply,
-        'embed': discord.Embed,
-        'Color': discord.Color,
-        'File': discord.File
-    }
+                # Create safe execution environment
+                safe_globals = {
+                    '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
+                    'discord': discord,
+                    'asyncio': asyncio,
+                    'random': __import__('random'),
+                    'datetime': datetime,
+                    'math': __import__('math'),
+                    'json': json,
+                    're': __import__('re'),
+                    # Command context variables
+                    'ctx': ctx,
+                    'bot': self.bot,
+                    'args': args,
+                    'user': ctx.author,
+                    'guild': ctx.guild,
+                    'channel': ctx.channel,
+                    'message': ctx.message,
+                    # Helper functions
+                    'send': ctx.send,
+                    'reply': ctx.reply,
+                    'embed': discord.Embed,
+                    'Color': discord.Color,
+                    'File': discord.File
+                }
 
-    # Execute the code
-    local_vars = {}
-    exec(custom_cmd.code, safe_globals, local_vars)
+                # Execute the code
+                local_vars = {}
+                exec(custom_cmd.code, safe_globals, local_vars)
 
-except Exception as e:
-    embed = discord.Embed(
-        title="❌ Command Error",
-        description=f"Error in custom command `{custom_cmd.name}`:\n```{str(e)}```",
-        color=discord.Color.red()
-    )
-    await ctx.send(embed=embed)
-    logger.error(f"Custom command error: {e}")
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ Command Error",
+                    description=f"Error in custom command `{custom_cmd.name}`:\n```{str(e)}```",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                logger.error(f"Custom command error: {e}")
 
-return dynamic_code_command
+        return dynamic_code_command
 
 class HealthMonitor:
     def __init__(self, instance):
@@ -611,11 +612,11 @@ async def bothelp(ctx):
         color=discord.Color.blue()
     )
 
-    embed.add_field(
-        name="👑 Moderation",
-        value="`ban @user [reason]` - Ban user\n`kick @user [reason]` - Kick user\n`timeout @user <time> [reason]` - Timeout\n`warn @user [reason]` - Warn user\n`deop @user [reason]` - Remove admin\n`reop @user` - Restore admin",
-        inline=False
-    )
+embed.add_field(
+   name="👑 Moderation",
+   value="`ban @user [reason]` - Ban user\n`tempban @user <time> [reason]` - Temporary ban\n`kick @user [reason]` - Kick user\n`timeout @user <time> [reason]` - Timeout\n`warn @user [reason]` - Warn user\n`deop @user [reason]` - Remove admin\n`reop @user` - Restore admin",
+   inline=False
+)
 
     embed.add_field(
         name="📊 Info & Utility",
@@ -865,6 +866,41 @@ async def hastatus(ctx):
     )
     
     await ctx.send(embed=embed)
+@bot.command()
+async def tempban(ctx, member: discord.Member, duration: str, *, reason="No reason provided"):
+   """Temporarily ban a user (1h, 1d, 7d format)"""
+   if not bot.is_authorized(ctx, "ban"):
+       return await ctx.send(embed=discord.Embed(title="❌ Access Denied", color=discord.Color.red()))
+   
+   try:
+       minutes = parse_duration(duration)
+       if minutes > 30 * 1440:  # 30 days max
+           return await ctx.send(embed=discord.Embed(title="❌ Max 30 days", color=discord.Color.red()))
+   except ValueError as e:
+       return await ctx.send(embed=discord.Embed(title="❌ Invalid Duration", description=str(e), color=discord.Color.red()))
+
+   try:
+       await member.ban(reason=f"TEMPBAN {minutes}m by {ctx.author}: {reason}")
+       
+       # Schedule unban
+       async def unban_later():
+           await asyncio.sleep(minutes * 60)
+           try:
+               await ctx.guild.unban(member, reason="Temporary ban expired")
+           except:
+               pass
+       
+       asyncio.create_task(unban_later())
+       
+       embed = discord.Embed(title="⏰ User Temporarily Banned", color=discord.Color.red())
+       embed.add_field(name="User", value=member.display_name, inline=True)
+       embed.add_field(name="Duration", value=duration, inline=True)
+       embed.add_field(name="Reason", value=reason, inline=False)
+       
+       await ctx.send(embed=embed)
+       
+   except discord.Forbidden:
+       await ctx.send(embed=discord.Embed(title="❌ No Permission", color=discord.Color.red()))
 
 # Moderation Commands
 @bot.command()
