@@ -158,7 +158,7 @@ class CodeCommandManager:
                 
                 # Create safe execution environment
                 safe_globals = {
-                    '__builtins__': {k: __builtins__[k] for k in self.safe_builtins if k in __builtins__},
+                    '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
                     'discord': discord,
                     'asyncio': asyncio,
                     'random': __import__('random'),
