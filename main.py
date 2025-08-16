@@ -151,34 +151,33 @@ class CodeCommandManager:
             if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
                 return await ctx.send("❌ This command only works in servers")
         try:
-    # Update usage count
-    custom_cmd.usage_count += 1
-    self.bot.stats["custom_commands_used"] += 1
-    
-    # Create safe execution environment
-    safe_globals = {
-        '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
-        'discord': discord,
-        'asyncio': asyncio,
-        'random': __import__('random'),
-        'datetime': datetime,
-        'math': __import__('math'),
-        'json': json,
-        're': __import__('re'),
-        # Command context variables
-        'ctx': ctx,
-        'bot': self.bot,
-        'args': args,
-        'user': ctx.author,
-        'guild': ctx.guild,
-        'channel': ctx.channel,
-        'message': ctx.message,
-        # Helper functions
-        'send': ctx.send,
-        'reply': ctx.reply,
-        'embed': discord.Embed,
-        'Color': discord.Color,
-        'File': discord.File
+            # Update usage count
+            custom_cmd.usage_count += 1
+            self.bot.stats["custom_commands_used"] += 1
+            # Create safe execution environment
+        safe_globals = {
+            '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
+            'discord': discord,
+            'asyncio': asyncio,
+            'random': __import__('random'),
+            'datetime': datetime,
+            'math': __import__('math'),
+            'json': json,
+            're': __import__('re'),
+            # Command context variables
+            'ctx': ctx,
+            'bot': self.bot,
+            'args': args,
+            'user': ctx.author,
+            'guild': ctx.guild,
+            'channel': ctx.channel,
+            'message': ctx.message,
+            # Helper functions
+            'send': ctx.send,
+            'reply': ctx.reply,
+            'embed': discord.Embed,
+            'Color': discord.Color,
+            'File': discord.File
     }
     
     # Execute the code
