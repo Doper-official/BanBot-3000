@@ -150,8 +150,7 @@ class CodeCommandManager:
                 
             if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
                 return await ctx.send("❌ This command only works in servers")
-            
-           try:
+        try:
     # Update usage count
     custom_cmd.usage_count += 1
     self.bot.stats["custom_commands_used"] += 1
