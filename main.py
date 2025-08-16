@@ -77,14 +77,125 @@ class CustomCommand:
     name: str
     description: str
     response: str
+    code: Optional[str]  # Store Python code
     created_by: int
     created_at: datetime
+    guild_id: int  # Server-specific commands
     usage_count: int = 0
+    is_code_command: bool = False  # Track if it's a code command
     
     def to_dict(self):
         data = asdict(self)
         data['created_at'] = self.created_at.isoformat()
         return data
+
+class CodeCommandManager:
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+        # Allowed imports and functions for security
+        self.safe_imports = {
+            'discord', 'asyncio', 'random', 'datetime', 'math', 'json', 're'
+        }
+        self.safe_builtins = {
+            'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'tuple',
+            'range', 'enumerate', 'zip', 'max', 'min', 'sum', 'abs', 'round'
+        }
+        
+    def validate_code(self, code: str) -> tuple[bool, str]:
+        """Validate Python code for security"""
+        try:
+            # Parse the code to check syntax
+            parsed = ast.parse(code)
+            
+            # Check for dangerous operations
+            for node in ast.walk(parsed):
+                # Block dangerous imports
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name not in self.safe_imports:
+                            return False, f"❌ Import '{alias.name}' not allowed"
+                
+                if isinstance(node, ast.ImportFrom):
+                    if node.module not in self.safe_imports:
+                        return False, f"❌ Import from '{node.module}' not allowed"
+                
+                # Block dangerous function calls
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        if node.func.id in ['exec', 'eval', 'compile', 'open', '__import__']:
+                            return False, f"❌ Function '{node.func.id}' not allowed"
+                
+                # Block file operations, system calls, etc.
+                if isinstance(node, ast.Attribute):
+                    dangerous_attrs = ['system', 'popen', 'remove', 'rmdir', 'unlink']
+                    if node.attr in dangerous_attrs:
+                        return False, f"❌ Operation '{node.attr}' not allowed"
+            
+            return True, "✅ Code is safe"
+            
+        except SyntaxError as e:
+            return False, f"❌ Syntax Error: {str(e)}"
+        except Exception as e:
+            return False, f"❌ Validation Error: {str(e)}"
+    
+    def create_command_function(self, custom_cmd: CustomCommand):
+        """Create a dynamic command function from code"""
+        async def dynamic_code_command(ctx, *args):
+            if not self.bot.is_active_instance:
+                return
+            
+            # Check if command is for this guild only
+            if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
+                return  # Silent ignore for other guilds
+                
+            if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
+                return await ctx.send("❌ This command only works in servers")
+            
+            try:
+                # Update usage count
+                custom_cmd.usage_count += 1
+                self.bot.stats["custom_commands_used"] += 1
+                
+                # Create safe execution environment
+                safe_globals = {
+                    '__builtins__': {k: __builtins__[k] for k in self.safe_builtins if k in __builtins__},
+                    'discord': discord,
+                    'asyncio': asyncio,
+                    'random': __import__('random'),
+                    'datetime': datetime,
+                    'math': __import__('math'),
+                    'json': json,
+                    're': __import__('re'),
+                    # Command context variables
+                    'ctx': ctx,
+                    'bot': self.bot,
+                    'args': args,
+                    'user': ctx.author,
+                    'guild': ctx.guild,
+                    'channel': ctx.channel,
+                    'message': ctx.message,
+                    # Helper functions
+                    'send': ctx.send,
+                    'reply': ctx.reply,
+                    'embed': discord.Embed,
+                    'Color': discord.Color,
+                    'File': discord.File
+                }
+                
+                # Execute the code
+                local_vars = {}
+                exec(custom_cmd.code, safe_globals, local_vars)
+                
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ Command Error",
+                    description=f"Error in custom command `{custom_cmd.name}`:\n```{str(e)}```",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                logger.error(f"Custom command error: {e}")
+        
+        return dynamic_code_command
 
 class HealthMonitor:
     def __init__(self, instance):
@@ -203,7 +314,8 @@ class HTTPServer:
                 'description': cmd.description,
                 'usage_count': cmd.usage_count,
                 'created_by': cmd.created_by,
-                'created_at': cmd.created_at.isoformat()
+                'created_at': cmd.created_at.isoformat(),
+                'is_code_command': cmd.is_code_command
             }
         return web.json_response(commands_data)
     
@@ -220,9 +332,12 @@ class HTTPServer:
                             name=cmd_data['name'],
                             description=cmd_data['description'],
                             response=cmd_data['response'],
+                            code=cmd_data.get('code'),
                             created_by=cmd_data['created_by'],
                             created_at=datetime.fromisoformat(cmd_data['created_at']),
-                            usage_count=cmd_data.get('usage_count', 0)
+                            guild_id=cmd_data.get('guild_id', 0),
+                            usage_count=cmd_data.get('usage_count', 0),
+                            is_code_command=cmd_data.get('is_code_command', False)
                         )
                         self.bot.custom_commands[name] = cmd
                         self.bot.add_dynamic_command(cmd)
@@ -289,6 +404,9 @@ class BanBot3000HA(commands.Bot):
         self.warnings: List[Warning] = []
         self.custom_commands: Dict[str, CustomCommand] = {}
         self.command_history: deque = deque(maxlen=100)
+        
+        # Initialize code manager
+        self.code_manager = CodeCommandManager(self)
 
         self.next_warning_id = 1
         self.stats = {
@@ -342,38 +460,52 @@ class BanBot3000HA(commands.Bot):
 
     def add_dynamic_command(self, custom_cmd: CustomCommand):
         """Add a custom command dynamically"""
-        async def dynamic_command_func(ctx, *args):
-            if not self.is_active_instance:
-                return
+        if custom_cmd.is_code_command:
+            # Use code command manager for code-based commands
+            command_func = self.code_manager.create_command_function(custom_cmd)
+        else:
+            # Original simple text response commands
+            async def dynamic_command_func(ctx, *args):
+                if not self.is_active_instance:
+                    return
+                
+                # Check guild-specific command
+                if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
+                    return  # Silent ignore
+                    
+                if not ctx.guild and custom_cmd.guild_id != 0:
+                    return await ctx.send("❌ This command only works in servers")
+                
+                # Update usage count
+                custom_cmd.usage_count += 1
+                self.stats["custom_commands_used"] += 1
+                
+                # Replace placeholders in response
+                response = custom_cmd.response
+                response = response.replace("{user}", ctx.author.display_name)
+                response = response.replace("{guild}", ctx.guild.name if ctx.guild else "DM")
+                response = response.replace("{args}", " ".join(args) if args else "")
+                
+                embed = discord.Embed(
+                    title=f"📝 {custom_cmd.name.title()}",
+                    description=response,
+                    color=discord.Color.blue()
+                )
+                embed.set_footer(text=f"Custom command • Used {custom_cmd.usage_count} times")
+                await ctx.send(embed=embed)
             
-            # Update usage count
-            custom_cmd.usage_count += 1
-            self.stats["custom_commands_used"] += 1
-            
-            # Replace placeholders in response
-            response = custom_cmd.response
-            response = response.replace("{user}", ctx.author.display_name)
-            response = response.replace("{guild}", ctx.guild.name if ctx.guild else "DM")
-            response = response.replace("{args}", " ".join(args) if args else "")
-            
-            embed = discord.Embed(
-                title=f"📝 {custom_cmd.name.title()}",
-                description=response,
-                color=discord.Color.blue()
-            )
-            embed.set_footer(text=f"Custom command • Used {custom_cmd.usage_count} times")
-            await ctx.send(embed=embed)
+            command_func = dynamic_command_func
 
         # Create the command
         command = commands.Command(
-            dynamic_command_func,
+            command_func,
             name=custom_cmd.name,
             help=custom_cmd.description
         )
         
         # Add to bot
         self.add_command(command)
-        logger.info(f"Added dynamic command: {custom_cmd.name}")
+        logger.info(f"Added dynamic command: {custom_cmd.name} ({'code' if custom_cmd.is_code_command else 'text'})")
 
     async def become_active(self):
         if self.is_active_instance:
@@ -456,6 +588,18 @@ bot = BanBot3000HA(role, port, peer_url)
 
 # --- COMMANDS ---
 
+def parse_duration(duration_str: str) -> int:
+    """Parse duration string and return minutes"""
+    duration_str = duration_str.replace(" ", "").lower()
+    if duration_str.endswith('m'):
+        return int(duration_str[:-1])
+    elif duration_str.endswith('h'):
+        return int(duration_str[:-1]) * 60
+    elif duration_str.endswith('d'):
+        return int(duration_str[:-1]) * 1440
+    else:
+        raise ValueError("Use format: 1m, 1h, 1d")
+
 @bot.command(name="help", aliases=["h"])
 async def bothelp(ctx):
     """Display help information"""
@@ -482,7 +626,7 @@ async def bothelp(ctx):
 
     embed.add_field(
         name="🔧 Custom Commands",
-        value="`addcmd <name> <description> <response>` - Add custom command\n`delcmd <name>` - Delete custom command\n`listcmds` - List custom commands",
+        value="`addcmd <name> text <description> | <response>` - Add text command\n`addcmd <name> code <description> | <python_code>` - Add code command\n`delcmd <name>` - Delete custom command\n`listcmds` - List custom commands",
         inline=False
     )
 
@@ -494,204 +638,6 @@ async def bothelp(ctx):
 
     await ctx.send(embed=embed)
 
-def parse_duration(duration_str: str) -> int:
-    """Parse duration string and return minutes"""
-    duration_str = duration_str.replace(" ", "").lower()
-    if duration_str.endswith('m'):
-        return int(duration_str[:-1])
-    elif duration_str.endswith('h'):
-        return int(duration_str[:-1]) * 60
-    elif duration_str.endswith('d'):
-        return int(duration_str[:-1]) * 1440
-    else:
-        raise ValueError("Use format: 1m, 1h, 1d")
-
-# Add these imports to the top of your main.py
-import ast
-import textwrap
-from typing import Union
-
-# Modified CustomCommand dataclass - add this to replace the existing one
-@dataclass
-class CustomCommand:
-    name: str
-    description: str
-    response: str
-    code: Optional[str]  # New: Store the actual Python code
-    created_by: int
-    created_at: datetime
-    guild_id: int  # New: Server-specific commands
-    usage_count: int = 0
-    is_code_command: bool = False  # New: Track if it's a code command
-    
-    def to_dict(self):
-        data = asdict(self)
-        data['created_at'] = self.created_at.isoformat()
-        return data
-
-# Add this class for code validation and execution
-class CodeCommandManager:
-    def __init__(self, bot_instance):
-        self.bot = bot_instance
-        # Allowed imports and functions for security
-        self.safe_imports = {
-            'discord', 'asyncio', 'random', 'datetime', 'math', 'json', 're'
-        }
-        self.safe_builtins = {
-            'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'tuple',
-            'range', 'enumerate', 'zip', 'max', 'min', 'sum', 'abs', 'round'
-        }
-        
-    def validate_code(self, code: str) -> tuple[bool, str]:
-        """Validate Python code for security"""
-        try:
-            # Parse the code to check syntax
-            parsed = ast.parse(code)
-            
-            # Check for dangerous operations
-            for node in ast.walk(parsed):
-                # Block dangerous imports
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name not in self.safe_imports:
-                            return False, f"❌ Import '{alias.name}' not allowed"
-                
-                if isinstance(node, ast.ImportFrom):
-                    if node.module not in self.safe_imports:
-                        return False, f"❌ Import from '{node.module}' not allowed"
-                
-                # Block dangerous function calls
-                if isinstance(node, ast.Call):
-                    if isinstance(node.func, ast.Name):
-                        if node.func.id in ['exec', 'eval', 'compile', 'open', '__import__']:
-                            return False, f"❌ Function '{node.func.id}' not allowed"
-                
-                # Block file operations, system calls, etc.
-                if isinstance(node, ast.Attribute):
-                    dangerous_attrs = ['system', 'popen', 'remove', 'rmdir', 'unlink']
-                    if node.attr in dangerous_attrs:
-                        return False, f"❌ Operation '{node.attr}' not allowed"
-            
-            return True, "✅ Code is safe"
-            
-        except SyntaxError as e:
-            return False, f"❌ Syntax Error: {str(e)}"
-        except Exception as e:
-            return False, f"❌ Validation Error: {str(e)}"
-    
-    def create_command_function(self, custom_cmd: CustomCommand):
-        """Create a dynamic command function from code"""
-        async def dynamic_code_command(ctx, *args):
-            if not self.bot.is_active_instance:
-                return
-            
-            # Check if command is for this guild only
-            if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
-                return  # Silent ignore for other guilds
-                
-            if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
-                return await ctx.send("❌ This command only works in servers")
-            
-            try:
-                # Update usage count
-                custom_cmd.usage_count += 1
-                self.bot.stats["custom_commands_used"] += 1
-                
-                # Create safe execution environment
-                safe_globals = {
-                    '__builtins__': {k: __builtins__[k] for k in self.safe_builtins if k in __builtins__},
-                    'discord': discord,
-                    'asyncio': asyncio,
-                    'random': __import__('random'),
-                    'datetime': datetime,
-                    'math': __import__('math'),
-                    'json': json,
-                    're': __import__('re'),
-                    # Command context variables
-                    'ctx': ctx,
-                    'bot': self.bot,
-                    'args': args,
-                    'user': ctx.author,
-                    'guild': ctx.guild,
-                    'channel': ctx.channel,
-                    'message': ctx.message,
-                    # Helper functions
-                    'send': ctx.send,
-                    'reply': ctx.reply,
-                    'embed': discord.Embed,
-                    'Color': discord.Color,
-                    'File': discord.File
-                }
-                
-                # Execute the code
-                local_vars = {}
-                exec(custom_cmd.code, safe_globals, local_vars)
-                
-            except Exception as e:
-                embed = discord.Embed(
-                    title="❌ Command Error",
-                    description=f"Error in custom command `{custom_cmd.name}`:\n```{str(e)}```",
-                    color=discord.Color.red()
-                )
-                await ctx.send(embed=embed)
-                logger.error(f"Custom command error: {e}")
-        
-        return dynamic_code_command
-
-# Add this to the BanBot3000HA class (replace the existing add_dynamic_command method)
-def add_dynamic_command(self, custom_cmd: CustomCommand):
-    """Add a custom command dynamically"""
-    if custom_cmd.is_code_command:
-        # Use code command manager for code-based commands
-        command_func = self.code_manager.create_command_function(custom_cmd)
-    else:
-        # Original simple text response commands
-        async def dynamic_command_func(ctx, *args):
-            if not self.is_active_instance:
-                return
-            
-            # Check guild-specific command
-            if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
-                return  # Silent ignore
-                
-            if not ctx.guild and custom_cmd.guild_id != 0:
-                return await ctx.send("❌ This command only works in servers")
-            
-            # Update usage count
-            custom_cmd.usage_count += 1
-            self.stats["custom_commands_used"] += 1
-            
-            # Replace placeholders in response
-            response = custom_cmd.response
-            response = response.replace("{user}", ctx.author.display_name)
-            response = response.replace("{guild}", ctx.guild.name if ctx.guild else "DM")
-            response = response.replace("{args}", " ".join(args) if args else "")
-            
-            embed = discord.Embed(
-                title=f"📝 {custom_cmd.name.title()}",
-                description=response,
-                color=discord.Color.blue()
-            )
-            embed.set_footer(text=f"Custom command • Used {custom_cmd.usage_count} times")
-            await ctx.send(embed=embed)
-        
-        command_func = dynamic_command_func
-
-    # Create the command
-    command = commands.Command(
-        command_func,
-        name=custom_cmd.name,
-        help=custom_cmd.description
-    )
-    
-    # Add to bot
-    self.add_command(command)
-    logger.info(f"Added dynamic command: {custom_cmd.name} ({'code' if custom_cmd.is_code_command else 'text'})")
-
-# Add this to the BanBot3000HA __init__ method (after self.custom_commands = {}):
-self.code_manager = CodeCommandManager(self)
-
-# Replace the existing addcmd command with this advanced version:
 @bot.command()
 async def addcmd(ctx, name: str, cmd_type: str, *, content: str):
     """Add a custom command (Admin only)
@@ -725,13 +671,8 @@ async def addcmd(ctx, name: str, cmd_type: str, *, content: str):
     guild_id = ctx.guild.id if ctx.guild else 0
     
     # Check if command already exists in this guild
-    existing_cmd = None
-    for cmd_name, cmd in bot.custom_commands.items():
-        if cmd_name == name and cmd.guild_id == guild_id:
-            existing_cmd = cmd
-            break
-    
-    if existing_cmd or name in [cmd.name for cmd in bot.commands]:
+    command_key = f"{guild_id}_{name}"
+    if command_key in bot.custom_commands or name in [cmd.name for cmd in bot.commands]:
         return await ctx.send(embed=discord.Embed(title="❌ Command already exists in this server", color=discord.Color.red()))
     
     # Handle code commands
@@ -785,13 +726,11 @@ async def addcmd(ctx, name: str, cmd_type: str, *, content: str):
         embed.set_footer(text="Placeholders: {user}, {guild}, {args}")
     
     # Add to storage and bot
-    command_key = f"{guild_id}_{name}"  # Guild-specific key
     bot.custom_commands[command_key] = custom_cmd
     bot.add_dynamic_command(custom_cmd)
     
     await ctx.send(embed=embed)
 
-# Update the delcmd command to handle guild-specific commands:
 @bot.command()
 async def delcmd(ctx, name: str):
     """Delete a custom command (Admin only)"""
@@ -818,7 +757,6 @@ async def delcmd(ctx, name: str):
     
     await ctx.send(embed=embed)
 
-# Update listcmds to show guild-specific commands:
 @bot.command()
 async def listcmds(ctx):
     """List all custom commands for this server"""
@@ -856,58 +794,6 @@ async def listcmds(ctx):
         embed.set_footer(text=f"Showing 10/{len(guild_commands)} commands")
     
     await ctx.send(embed=embed)
-
-@bot.command()
-async def delcmd(ctx, name: str):
-    """Delete a custom command (Admin only)"""
-    if not bot.is_active_instance or not bot.is_admin(ctx.author):
-        return await ctx.send(embed=discord.Embed(title="❌ Admin Only", color=discord.Color.red()))
-    
-    name = name.lower()
-    
-    if name not in bot.custom_commands:
-        return await ctx.send(embed=discord.Embed(title="❌ Command not found", color=discord.Color.red()))
-    
-    # Remove from storage
-    cmd = bot.custom_commands.pop(name)
-    
-    # Remove from bot
-    bot.remove_command(name)
-    
-    embed = discord.Embed(title="🗑️ Custom Command Deleted", color=discord.Color.orange())
-    embed.add_field(name="Name", value=name, inline=True)
-    embed.add_field(name="Usage Count", value=cmd.usage_count, inline=True)
-    
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def listcmds(ctx):
-    """List all custom commands"""
-    if not bot.is_active_instance:
-        return
-    
-    if not bot.custom_commands:
-        return await ctx.send(embed=discord.Embed(title="📝 No Custom Commands", description="No custom commands have been added yet.", color=discord.Color.blue()))
-    
-    embed = discord.Embed(title="📝 Custom Commands", color=discord.Color.blue())
-    embed.description = f"Total: {len(bot.custom_commands)} commands"
-    
-    for name, cmd in list(bot.custom_commands.items())[:10]:  # Show max 10
-        creator = bot.get_user(cmd.created_by)
-        creator_name = creator.display_name if creator else "Unknown"
-        
-        embed.add_field(
-            name=f"`bot {name}`",
-            value=f"**Description:** {cmd.description}\n**Creator:** {creator_name}\n**Uses:** {cmd.usage_count}",
-            inline=False
-        )
-    
-    if len(bot.custom_commands) > 10:
-        embed.set_footer(text=f"Showing 10/{len(bot.custom_commands)} commands")
-    
-    await ctx.send(embed=embed)
-
-# --- EXISTING MODERATION COMMANDS ---
 
 @bot.command()
 async def ping(ctx):
@@ -981,9 +867,7 @@ async def hastatus(ctx):
     
     await ctx.send(embed=embed)
 
-# Add all your existing moderation commands here (ban, kick, timeout, etc.)
-# I'll include a few key ones:
-
+# Moderation Commands
 @bot.command()
 async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     """Ban a user"""
@@ -1008,25 +892,6 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
         
     except discord.Forbidden:
         await ctx.send(embed=discord.Embed(title="❌ No Permission", color=discord.Color.red()))
-
-@bot.command()
-async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
-    """Warn a user"""
-    if not bot.is_authorized(ctx, "warn"):
-        return await ctx.send(embed=discord.Embed(title="❌ You're deopped", color=discord.Color.red()))
-    
-    if member == ctx.author:
-        return await ctx.send(embed=discord.Embed(title="❌ Can't warn yourself", color=discord.Color.red()))
-
-    warning = bot.add_warning(member.id, ctx.author.id, reason)
-    warnings_count = len(bot.get_user_warnings(member.id))
-    
-    embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.yellow())
-    embed.add_field(name="User", value=f"{member.display_name}", inline=True)
-    embed.add_field(name="Warning #", value=f"{warning.id} (Total: {warnings_count})", inline=True)
-    embed.add_field(name="Reason", value=reason, inline=False)
-    
-    await ctx.send(embed=embed)
 
 @bot.command()
 async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
@@ -1082,6 +947,25 @@ async def timeout(ctx, member: discord.Member, duration: str, *, reason="No reas
         
     except discord.Forbidden:
         await ctx.send(embed=discord.Embed(title="❌ No Permission", color=discord.Color.red()))
+
+@bot.command()
+async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
+    """Warn a user"""
+    if not bot.is_authorized(ctx, "warn"):
+        return await ctx.send(embed=discord.Embed(title="❌ You're deopped", color=discord.Color.red()))
+    
+    if member == ctx.author:
+        return await ctx.send(embed=discord.Embed(title="❌ Can't warn yourself", color=discord.Color.red()))
+
+    warning = bot.add_warning(member.id, ctx.author.id, reason)
+    warnings_count = len(bot.get_user_warnings(member.id))
+    
+    embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.yellow())
+    embed.add_field(name="User", value=f"{member.display_name}", inline=True)
+    embed.add_field(name="Warning #", value=f"{warning.id} (Total: {warnings_count})", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def warnings(ctx, member: discord.Member = None):
