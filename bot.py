@@ -48,7 +48,7 @@ class ModerationAction:
     moderator_id: int
     action: ActionType
     reason: str
-    timestamp: datetime
+    timestamp: datetim
     duration: Optional[int] = None
     active: bool = True
     
