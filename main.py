@@ -155,7 +155,7 @@ class CodeCommandManager:
             custom_cmd.usage_count += 1
             self.bot.stats["custom_commands_used"] += 1
             # Create safe execution environment
-        safe_globals = {
+            safe_globals = {
             '__builtins__': {k: getattr(__builtins__, k, None) for k in self.safe_builtins if hasattr(__builtins__, k)},
             'discord': discord,
             'asyncio': asyncio,
@@ -178,7 +178,7 @@ class CodeCommandManager:
             'embed': discord.Embed,
             'Color': discord.Color,
             'File': discord.File
-    }
+        }
     
     # Execute the code
     local_vars = {}
