@@ -8,12 +8,14 @@ import time
 import logging
 import signal
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Union, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 from collections import defaultdict, deque
 import json
 import inspect
+import ast
+import textwrap
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -504,36 +506,354 @@ def parse_duration(duration_str: str) -> int:
     else:
         raise ValueError("Use format: 1m, 1h, 1d")
 
+# Add these imports to the top of your main.py
+import ast
+import textwrap
+from typing import Union
+
+# Modified CustomCommand dataclass - add this to replace the existing one
+@dataclass
+class CustomCommand:
+    name: str
+    description: str
+    response: str
+    code: Optional[str]  # New: Store the actual Python code
+    created_by: int
+    created_at: datetime
+    guild_id: int  # New: Server-specific commands
+    usage_count: int = 0
+    is_code_command: bool = False  # New: Track if it's a code command
+    
+    def to_dict(self):
+        data = asdict(self)
+        data['created_at'] = self.created_at.isoformat()
+        return data
+
+# Add this class for code validation and execution
+class CodeCommandManager:
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+        # Allowed imports and functions for security
+        self.safe_imports = {
+            'discord', 'asyncio', 'random', 'datetime', 'math', 'json', 're'
+        }
+        self.safe_builtins = {
+            'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'tuple',
+            'range', 'enumerate', 'zip', 'max', 'min', 'sum', 'abs', 'round'
+        }
+        
+    def validate_code(self, code: str) -> tuple[bool, str]:
+        """Validate Python code for security"""
+        try:
+            # Parse the code to check syntax
+            parsed = ast.parse(code)
+            
+            # Check for dangerous operations
+            for node in ast.walk(parsed):
+                # Block dangerous imports
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name not in self.safe_imports:
+                            return False, f"❌ Import '{alias.name}' not allowed"
+                
+                if isinstance(node, ast.ImportFrom):
+                    if node.module not in self.safe_imports:
+                        return False, f"❌ Import from '{node.module}' not allowed"
+                
+                # Block dangerous function calls
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        if node.func.id in ['exec', 'eval', 'compile', 'open', '__import__']:
+                            return False, f"❌ Function '{node.func.id}' not allowed"
+                
+                # Block file operations, system calls, etc.
+                if isinstance(node, ast.Attribute):
+                    dangerous_attrs = ['system', 'popen', 'remove', 'rmdir', 'unlink']
+                    if node.attr in dangerous_attrs:
+                        return False, f"❌ Operation '{node.attr}' not allowed"
+            
+            return True, "✅ Code is safe"
+            
+        except SyntaxError as e:
+            return False, f"❌ Syntax Error: {str(e)}"
+        except Exception as e:
+            return False, f"❌ Validation Error: {str(e)}"
+    
+    def create_command_function(self, custom_cmd: CustomCommand):
+        """Create a dynamic command function from code"""
+        async def dynamic_code_command(ctx, *args):
+            if not self.bot.is_active_instance:
+                return
+            
+            # Check if command is for this guild only
+            if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
+                return  # Silent ignore for other guilds
+                
+            if not ctx.guild and custom_cmd.guild_id != 0:  # 0 = DM allowed
+                return await ctx.send("❌ This command only works in servers")
+            
+            try:
+                # Update usage count
+                custom_cmd.usage_count += 1
+                self.bot.stats["custom_commands_used"] += 1
+                
+                # Create safe execution environment
+                safe_globals = {
+                    '__builtins__': {k: __builtins__[k] for k in self.safe_builtins if k in __builtins__},
+                    'discord': discord,
+                    'asyncio': asyncio,
+                    'random': __import__('random'),
+                    'datetime': datetime,
+                    'math': __import__('math'),
+                    'json': json,
+                    're': __import__('re'),
+                    # Command context variables
+                    'ctx': ctx,
+                    'bot': self.bot,
+                    'args': args,
+                    'user': ctx.author,
+                    'guild': ctx.guild,
+                    'channel': ctx.channel,
+                    'message': ctx.message,
+                    # Helper functions
+                    'send': ctx.send,
+                    'reply': ctx.reply,
+                    'embed': discord.Embed,
+                    'Color': discord.Color,
+                    'File': discord.File
+                }
+                
+                # Execute the code
+                local_vars = {}
+                exec(custom_cmd.code, safe_globals, local_vars)
+                
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ Command Error",
+                    description=f"Error in custom command `{custom_cmd.name}`:\n```{str(e)}```",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                logger.error(f"Custom command error: {e}")
+        
+        return dynamic_code_command
+
+# Add this to the BanBot3000HA class (replace the existing add_dynamic_command method)
+def add_dynamic_command(self, custom_cmd: CustomCommand):
+    """Add a custom command dynamically"""
+    if custom_cmd.is_code_command:
+        # Use code command manager for code-based commands
+        command_func = self.code_manager.create_command_function(custom_cmd)
+    else:
+        # Original simple text response commands
+        async def dynamic_command_func(ctx, *args):
+            if not self.is_active_instance:
+                return
+            
+            # Check guild-specific command
+            if ctx.guild and ctx.guild.id != custom_cmd.guild_id:
+                return  # Silent ignore
+                
+            if not ctx.guild and custom_cmd.guild_id != 0:
+                return await ctx.send("❌ This command only works in servers")
+            
+            # Update usage count
+            custom_cmd.usage_count += 1
+            self.stats["custom_commands_used"] += 1
+            
+            # Replace placeholders in response
+            response = custom_cmd.response
+            response = response.replace("{user}", ctx.author.display_name)
+            response = response.replace("{guild}", ctx.guild.name if ctx.guild else "DM")
+            response = response.replace("{args}", " ".join(args) if args else "")
+            
+            embed = discord.Embed(
+                title=f"📝 {custom_cmd.name.title()}",
+                description=response,
+                color=discord.Color.blue()
+            )
+            embed.set_footer(text=f"Custom command • Used {custom_cmd.usage_count} times")
+            await ctx.send(embed=embed)
+        
+        command_func = dynamic_command_func
+
+    # Create the command
+    command = commands.Command(
+        command_func,
+        name=custom_cmd.name,
+        help=custom_cmd.description
+    )
+    
+    # Add to bot
+    self.add_command(command)
+    logger.info(f"Added dynamic command: {custom_cmd.name} ({'code' if custom_cmd.is_code_command else 'text'})")
+
+# Add this to the BanBot3000HA __init__ method (after self.custom_commands = {}):
+self.code_manager = CodeCommandManager(self)
+
+# Replace the existing addcmd command with this advanced version:
 @bot.command()
-async def addcmd(ctx, name: str, description: str, *, response: str):
-    """Add a custom command (Admin only)"""
+async def addcmd(ctx, name: str, cmd_type: str, *, content: str):
+    """Add a custom command (Admin only)
+    
+    Usage:
+    bot addcmd <name> text <description> | <response>
+    bot addcmd <name> code <description> | <python_code>
+    """
     if not bot.is_active_instance or not bot.is_admin(ctx.author):
         return await ctx.send(embed=discord.Embed(title="❌ Admin Only", color=discord.Color.red()))
     
     name = name.lower()
+    cmd_type = cmd_type.lower()
     
-    # Check if command already exists
-    if name in [cmd.name for cmd in bot.commands] or name in bot.custom_commands:
-        return await ctx.send(embed=discord.Embed(title="❌ Command already exists", color=discord.Color.red()))
+    if cmd_type not in ['text', 'code']:
+        return await ctx.send(embed=discord.Embed(
+            title="❌ Invalid Type", 
+            description="Use `text` for simple responses or `code` for Python code",
+            color=discord.Color.red()
+        ))
     
-    # Create custom command
-    custom_cmd = CustomCommand(
-        name=name,
-        description=description,
-        response=response,
-        created_by=ctx.author.id,
-        created_at=datetime.now(timezone.utc)
-    )
+    # Parse content (description | response/code)
+    if ' | ' not in content:
+        return await ctx.send(embed=discord.Embed(
+            title="❌ Invalid Format", 
+            description="Use: `bot addcmd <name> <type> <description> | <content>`",
+            color=discord.Color.red()
+        ))
+    
+    description, main_content = content.split(' | ', 1)
+    guild_id = ctx.guild.id if ctx.guild else 0
+    
+    # Check if command already exists in this guild
+    existing_cmd = None
+    for cmd_name, cmd in bot.custom_commands.items():
+        if cmd_name == name and cmd.guild_id == guild_id:
+            existing_cmd = cmd
+            break
+    
+    if existing_cmd or name in [cmd.name for cmd in bot.commands]:
+        return await ctx.send(embed=discord.Embed(title="❌ Command already exists in this server", color=discord.Color.red()))
+    
+    # Handle code commands
+    if cmd_type == 'code':
+        # Validate the code
+        is_safe, validation_msg = bot.code_manager.validate_code(main_content)
+        if not is_safe:
+            embed = discord.Embed(title="❌ Code Validation Failed", color=discord.Color.red())
+            embed.description = validation_msg
+            embed.add_field(name="Allowed Imports", value=", ".join(bot.code_manager.safe_imports), inline=False)
+            embed.add_field(name="Example", value="```python\nawait send('Hello!')\nembed = discord.Embed(title='Test')\nawait ctx.send(embed=embed)```", inline=False)
+            return await ctx.send(embed=embed)
+        
+        # Create code command
+        custom_cmd = CustomCommand(
+            name=name,
+            description=description,
+            response="",  # Not used for code commands
+            code=main_content,
+            created_by=ctx.author.id,
+            created_at=datetime.now(timezone.utc),
+            guild_id=guild_id,
+            is_code_command=True
+        )
+        
+        embed = discord.Embed(title="✅ Code Command Added", color=discord.Color.green())
+        embed.add_field(name="Name", value=name, inline=True)
+        embed.add_field(name="Type", value="🐍 Python Code", inline=True)
+        embed.add_field(name="Server", value=ctx.guild.name if ctx.guild else "Global", inline=True)
+        embed.add_field(name="Description", value=description, inline=False)
+        embed.add_field(name="Code Preview", value=f"```python\n{main_content[:200]}{'...' if len(main_content) > 200 else ''}```", inline=False)
+        
+    else:  # text command
+        custom_cmd = CustomCommand(
+            name=name,
+            description=description,
+            response=main_content,
+            code=None,
+            created_by=ctx.author.id,
+            created_at=datetime.now(timezone.utc),
+            guild_id=guild_id,
+            is_code_command=False
+        )
+        
+        embed = discord.Embed(title="✅ Text Command Added", color=discord.Color.green())
+        embed.add_field(name="Name", value=name, inline=True)
+        embed.add_field(name="Type", value="📝 Text Response", inline=True)
+        embed.add_field(name="Server", value=ctx.guild.name if ctx.guild else "Global", inline=True)
+        embed.add_field(name="Description", value=description, inline=False)
+        embed.add_field(name="Response", value=main_content[:200] + "..." if len(main_content) > 200 else main_content, inline=False)
+        embed.set_footer(text="Placeholders: {user}, {guild}, {args}")
     
     # Add to storage and bot
-    bot.custom_commands[name] = custom_cmd
+    command_key = f"{guild_id}_{name}"  # Guild-specific key
+    bot.custom_commands[command_key] = custom_cmd
     bot.add_dynamic_command(custom_cmd)
     
-    embed = discord.Embed(title="✅ Custom Command Added", color=discord.Color.green())
+    await ctx.send(embed=embed)
+
+# Update the delcmd command to handle guild-specific commands:
+@bot.command()
+async def delcmd(ctx, name: str):
+    """Delete a custom command (Admin only)"""
+    if not bot.is_active_instance or not bot.is_admin(ctx.author):
+        return await ctx.send(embed=discord.Embed(title="❌ Admin Only", color=discord.Color.red()))
+    
+    name = name.lower()
+    guild_id = ctx.guild.id if ctx.guild else 0
+    command_key = f"{guild_id}_{name}"
+    
+    if command_key not in bot.custom_commands:
+        return await ctx.send(embed=discord.Embed(title="❌ Command not found in this server", color=discord.Color.red()))
+    
+    # Remove from storage
+    cmd = bot.custom_commands.pop(command_key)
+    
+    # Remove from bot
+    bot.remove_command(name)
+    
+    embed = discord.Embed(title="🗑️ Custom Command Deleted", color=discord.Color.orange())
     embed.add_field(name="Name", value=name, inline=True)
-    embed.add_field(name="Description", value=description, inline=True)
-    embed.add_field(name="Response Preview", value=response[:100] + "..." if len(response) > 100 else response, inline=False)
-    embed.set_footer(text="Use placeholders: {user}, {guild}, {args}")
+    embed.add_field(name="Type", value="🐍 Code" if cmd.is_code_command else "📝 Text", inline=True)
+    embed.add_field(name="Usage Count", value=cmd.usage_count, inline=True)
+    
+    await ctx.send(embed=embed)
+
+# Update listcmds to show guild-specific commands:
+@bot.command()
+async def listcmds(ctx):
+    """List all custom commands for this server"""
+    if not bot.is_active_instance:
+        return
+    
+    guild_id = ctx.guild.id if ctx.guild else 0
+    guild_commands = {k: v for k, v in bot.custom_commands.items() if v.guild_id == guild_id}
+    
+    if not guild_commands:
+        return await ctx.send(embed=discord.Embed(
+            title="📝 No Custom Commands", 
+            description=f"No custom commands in {'this server' if ctx.guild else 'DMs'} yet.", 
+            color=discord.Color.blue()
+        ))
+    
+    embed = discord.Embed(
+        title=f"📝 Custom Commands for {ctx.guild.name if ctx.guild else 'DMs'}", 
+        color=discord.Color.blue()
+    )
+    embed.description = f"Total: {len(guild_commands)} commands"
+    
+    for i, (key, cmd) in enumerate(list(guild_commands.items())[:10]):
+        creator = bot.get_user(cmd.created_by)
+        creator_name = creator.display_name if creator else "Unknown"
+        cmd_type = "🐍 Code" if cmd.is_code_command else "📝 Text"
+        
+        embed.add_field(
+            name=f"`bot {cmd.name}` ({cmd_type})",
+            value=f"**Description:** {cmd.description}\n**Creator:** {creator_name}\n**Uses:** {cmd.usage_count}",
+            inline=False
+        )
+    
+    if len(guild_commands) > 10:
+        embed.set_footer(text=f"Showing 10/{len(guild_commands)} commands")
     
     await ctx.send(embed=embed)
 
